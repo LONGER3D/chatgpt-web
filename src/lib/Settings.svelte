@@ -36,6 +36,10 @@ export const getRequestSettingList = (): ChatSetting[] => {
       return chatSettingsList.filter(s => s.key in gptDefaults)
 }
 
+export const hasChatSetting = (key: keyof ChatSettings): boolean => {
+      return !!chatSettingLookup[key]
+}
+
 export const getChatSettingObjectByKey = (key: keyof ChatSettings): ChatSetting => {
       const result = chatSettingLookup[key]
       if (!result) console.error(`Chat Setting "${key}" not defined in Settings array.`)
@@ -62,12 +66,8 @@ export const getExcludeFromProfile = () => {
   return excludeFromProfile
 }
 
-const isNotOpenAI = (chatId) => {
-  return getModelDetail(getChatSettings(chatId).model).type !== 'OpenAIChat'
-}
-
-const isNotPetals = (chatId) => {
-  return getModelDetail(getChatSettings(chatId).model).type !== 'Petals'
+const hideModelSetting = (chatId, setting) => {
+  return getModelDetail(getChatSettings(chatId).model).hideSetting(chatId, setting)
 }
 
 const gptDefaults = {
@@ -102,17 +102,27 @@ const defaults:ChatSettings = {
   summaryPrompt: '',
   useSystemPrompt: false,
   systemPrompt: '',
+  hideSystemPrompt: false,
   sendSystemPromptLast: false,
   autoStartSession: false,
   trainingPrompts: [],
   hiddenPromptPrefix: '',
   hppContinuePrompt: '',
   hppWithSummaryPrompt: false,
-  imageGenerationSize: '',
+  imageGenerationModel: '',
+  startSequence: '',
   stopSequence: '',
+  aggressiveStop: true,
+  delimiter: '',
   userMessageStart: '',
+  userMessageEnd: '',
   assistantMessageStart: '',
+  assistantMessageEnd: '',
   systemMessageStart: '',
+  systemMessageEnd: '',
+  leadPrompt: '',
+  repetitionPenalty: 1.1,
+  holdSocket: true,
   // useResponseAlteration: false,
   // responseAlterations: [],
   isDirty: false
@@ -134,12 +144,6 @@ const excludeFromProfile = {
   user: true,
   isDirty: true
 }
-
-export const imageGenerationSizes = [
-  '1024x1024', '512x512', '256x256'
-]
-
-export const imageGenerationSizeTypes = ['', ...imageGenerationSizes]
 
 export const chatSortOptions = {
   name: { text: 'Name', icon: faArrowDownAZ, value: '', sortFn: (a, b) => { return a.name < b.name ? -1 : a.name > b.name ? 1 : 0 } },
@@ -260,6 +264,13 @@ const systemPromptSettings: ChatSetting[] = [
         hide: (chatId) => true
       },
       {
+        key: 'hideSystemPrompt',
+        name: 'Hide System Prompt',
+        title: 'Don\'t show system prompt when displaying message stream.',
+        type: 'boolean',
+        hide: (chatId) => !getChatSettings(chatId).useSystemPrompt
+      },
+      {
         key: 'autoStartSession',
         name: 'Auto-Start Session',
         title: 'If possible, auto-start the chat session, sending a system prompt to get an initial response.',
@@ -356,16 +367,13 @@ const summarySettings: ChatSetting[] = [
         hide: (chatId) => getChatSettings(chatId).continuousChat !== 'summary'
       },
       {
-        key: 'imageGenerationSize',
-        name: 'Image Generation Size',
+        key: 'imageGenerationModel',
+        name: 'Image Generation Model',
         header: 'Image Generation',
         headerClass: 'is-info',
         title: 'Prompt an image with: show me an image of ...',
         type: 'select',
-        options: [
-          { value: '', text: 'OFF - Disable Image Generation' },
-          ...imageGenerationSizes.map(s => { return { value: s, text: s } })
-        ]
+        options: []
       }
 ]
 
@@ -420,13 +428,9 @@ const summarySettings: ChatSetting[] = [
 const modelSetting: ChatSetting & SettingSelect = {
       key: 'model',
       name: 'Model',
-      title: 'The model to use - GPT-3.5 is cheaper, but GPT-4 is more powerful.',
+      title: 'The model to use. Some may cost more than others.',
       header: (chatId) => {
-        if (isNotOpenAI(chatId)) {
-          return 'Below are the settings that can be changed for the API calls. See <a target="_blank" href="https://platform.openai.com/docs/api-reference/chat/create">this overview</a> to start, though not all settings translate to Petals.'
-        } else {
-          return 'Below are the settings that OpenAI allows to be changed for the API calls. See the <a target="_blank" href="https://platform.openai.com/docs/api-reference/chat/create">OpenAI API docs</a> for more details.'
-        }
+        return getModelDetail(getChatSettings(chatId).model).help
       },
       headerClass: 'is-warning',
       options: [],
@@ -446,7 +450,14 @@ const chatSettingsList: ChatSetting[] = [
         name: 'Stream Response',
         title: 'Stream responses as they are generated.',
         type: 'boolean',
-        hide: isNotOpenAI
+        hide: hideModelSetting
+      },
+      {
+        key: 'holdSocket',
+        name: 'Continue WebSocket',
+        title: 'Hold WebSocket connection open and try to re-use for each new chat message. Faster, but message delimitation could get mangled.',
+        type: 'boolean',
+        hide: hideModelSetting
       },
       {
         key: 'temperature',
@@ -478,7 +489,7 @@ const chatSettingsList: ChatSetting[] = [
         max: 10,
         step: 1,
         type: 'number',
-        hide: isNotOpenAI
+        hide: hideModelSetting
       },
       {
         key: 'max_tokens',
@@ -490,7 +501,6 @@ const chatSettingsList: ChatSetting[] = [
         max: 32768,
         step: 1,
         type: 'number',
-        hide: isNotOpenAI,
         forceApi: true // Since default here is different than gpt default, will make sure we always send it
       },
       {
@@ -501,7 +511,7 @@ const chatSettingsList: ChatSetting[] = [
         max: 2,
         step: 0.2,
         type: 'number',
-        hide: isNotOpenAI
+        hide: hideModelSetting
       },
       {
         key: 'frequency_penalty',
@@ -511,51 +521,134 @@ const chatSettingsList: ChatSetting[] = [
         max: 2,
         step: 0.2,
         type: 'number',
-        hide: isNotOpenAI
+        hide: hideModelSetting
+      },
+      {
+        key: 'repetitionPenalty',
+        name: 'Repetition Penalty',
+        title: 'Number between 1.0 and infinity. Penalize new tokens based on whether they appear in the text so far, increasing the model\'s likelihood to talk about new topics.',
+        min: 0,
+        max: 1000,
+        step: 0.1,
+        type: 'number',
+        hide: hideModelSetting
+      },
+      {
+        key: 'startSequence',
+        name: 'Start Sequence',
+        title: 'Characters used to start the message chain.',
+        type: 'textarea',
+        placeholder: (chatId) => {
+          const val = getModelDetail(getChatSettings(chatId).model).start
+          return val || ''
+        },
+        hide: hideModelSetting
       },
       {
         key: 'stopSequence',
-        name: 'Stop Sequence',
-        title: 'Characters used to separate messages in the message chain.',
-        type: 'text',
+        name: 'Stop Sequences',
+        title: 'Characters used to signal end of message chain. Separate multiple with a comma.',
+        type: 'textarea',
         placeholder: (chatId) => {
           const val = getModelDetail(getChatSettings(chatId).model).stop
-          return (val && val[0]) || ''
+          return (val && val.join(',')) || ''
         },
-        hide: isNotPetals
+        hide: hideModelSetting
+      },
+      {
+        key: 'aggressiveStop',
+        name: 'Use aggressive stop',
+        title: 'Sometimes generation can continue even after a stop sequence. This will stop generation client side if generation continues after stop sequence.',
+        type: 'boolean',
+        hide: hideModelSetting
+      },
+      {
+        key: 'delimiter',
+        name: 'Delimiter Sequence',
+        title: 'Characters used to separate messages in the message chain.',
+        type: 'textarea',
+        placeholder: (chatId) => {
+          const val = getModelDetail(getChatSettings(chatId).model).delimiter
+          return val || ''
+        },
+        hide: hideModelSetting
       },
       {
         key: 'userMessageStart',
         name: 'User Message Start Sequence',
-        title: 'Sequence to denote user messages in the message chain.',
-        type: 'text',
+        title: 'Sequence to denote start of user messages in the message chain.',
+        type: 'textarea',
         placeholder: (chatId) => {
           const val = getModelDetail(getChatSettings(chatId).model).userStart
           return val || ''
         },
-        hide: isNotPetals
+        hide: hideModelSetting
+      },
+      {
+        key: 'userMessageEnd',
+        name: 'User Message End Sequence',
+        title: 'Sequence to denote end of user messages in the message chain.',
+        type: 'textarea',
+        placeholder: (chatId) => {
+          const val = getModelDetail(getChatSettings(chatId).model).userEnd
+          return val || ''
+        },
+        hide: hideModelSetting
       },
       {
         key: 'assistantMessageStart',
         name: 'Assistant Message Start Sequence',
         title: 'Sequence to denote assistant messages in the message chain.',
-        type: 'text',
+        type: 'textarea',
         placeholder: (chatId) => {
           const val = getModelDetail(getChatSettings(chatId).model).assistantStart
           return val || ''
         },
-        hide: isNotPetals
+        hide: hideModelSetting
+      },
+      {
+        key: 'assistantMessageEnd',
+        name: 'Assistant Message End Sequence',
+        title: 'Sequence to denote end of assistant messages in the message chain.',
+        type: 'textarea',
+        placeholder: (chatId) => {
+          const val = getModelDetail(getChatSettings(chatId).model).assistantEnd
+          return val || ''
+        },
+        hide: hideModelSetting
       },
       {
         key: 'systemMessageStart',
         name: 'System Message Start Sequence',
         title: 'Sequence to denote system messages in the message chain.',
-        type: 'text',
+        type: 'textarea',
         placeholder: (chatId) => {
           const val = getModelDetail(getChatSettings(chatId).model).systemStart
           return val || ''
         },
-        hide: isNotPetals
+        hide: hideModelSetting
+      },
+      {
+        key: 'systemMessageEnd',
+        name: 'System Message End Sequence',
+        title: 'Sequence to denote end of system messages in the message chain.',
+        type: 'textarea',
+        placeholder: (chatId) => {
+          const val = getModelDetail(getChatSettings(chatId).model).systemEnd
+          return val || ''
+        },
+        hide: hideModelSetting
+      },
+      {
+        key: 'leadPrompt',
+        name: 'Completion Lead Sequence',
+        title: 'Sequence to hint to answer as assistant.',
+        type: 'textarea',
+        placeholder: (chatId) => {
+          const val = getModelDetail(getChatSettings(chatId).model).leadPrompt
+          return val || ''
+        },
+        hide: hideModelSetting
       },
       {
         // logit bias editor not implemented yet
